@@ -1,0 +1,214 @@
+We need to track transaction volume processed by client / application, split over processor. The primary driver is to inform us how to split revenue share paid to us by PSPs with platforms, so it needs to be extremely accurate.
+
+To support this, i want to create an GLOBAL "ledger" of all transactions processed, which is an anonymised version of all transactions from all clients in one place. We will then generate summaries over this data.
+
+We need to support 2 new GLOBAL object types:
+	* `tpv_item`: An anonymised transaction 
+	* `tpv_summary`: A summary of a group of transactions
+
+```
+GLOBAL.tpv_item: {
+ 	id: transaction, // "tr_1234_5678"
+	client: client, // "cl_1234"
+	application: client.application, // "sa_1357_1234"
+	when: transaction.processed, // "2021-02-24T10:18:13.831Z" 
+		-> For PENDING && UNATTRIBUTED, this needs to be when transitioned out of PENDING / UNATTRIBUTED, to success / decline, can you confirm this matches transaction.processed
+	day: floor(when.getTime()/1000/(60*60*24)) // "18682"
+	hour: floor(when.getTime()/1000/(60*60)) // "448378"
+	minute: floor(when.getTime()/1000/60) // "26902737"
+
+	excluded: [new_field] // true if manually resolved, false otherwise 
+	processor: payment_method.gateway.processor, // "STRIPE"
+	gateway: payment_method.gateway, // "gw_1234_5678"
+	card_type: payment_method.card_type, // "VISA"
+	action: transaction.action, // "CAPTURE"
+	source: transaction.source, // "ECOMMERCE" note: for capture, void, refund, we need to make sure these are storing the `source_transaction.source` in this field ie a CAPTURE.source == AUTH.source, and REFUND.source == CAPTURE.source == AUTH.source
+	status: transaction.status, // "SUCCESS" || "DECLINED" - any other status should not be in this table
+	gateway_status: transaction.status ? transaction.gateway_status : undefined // "DECLINED_ERROR" 
+	currency: transaction.settle_currency || transaction.currency, // "CLP"
+
+	amount: transaction.settle_gross_amount || transaction.amount // "9999.99"
+	fee_amount: transaction.settle_fee_amount, // "9999.99"
+}
+
+Store in boltp-db && all fields in the search server (transform the capitalisation consistently with core):
+
+search indexes: {
+	hour: "448378"
+	application_hour: application + "_" + hour eg sa_1234_5678_448378
+	client_hour: client + "_" + day eg cl_1234_448378 
+}
+```
+
+shuttle-api:
+GET /c/api/tpv/items/:id
+Response:
+{
+	tpv_item: {...} 
+}
+
+GET /c/api/tpv/items?application=&client=cl_1234&start=2021-02-24T10:18:13&end=2021-02-24T10:18:13&limit=100
+GET /c/api/instances/:instance_key/tpv/items?start=&end=&limit=
+Assert: 
+* instance_key OR application OR client passed, and api_key has permission on on that application
+* start - end, <= 24 hours (ie you cannot fetch items over greater than a 24 hour period) 
+Calculate the indexes to query over & criteria. Order the results by when ASC, default limit 20, max limit 1000
+
+Response:
+{
+	tpv_items: {...}
+	meta: {...}
+}
+
+IMPLEMENTATION
+* To create these objects, can we make call call shuttle-api/internal/notify_updates for all transactions saves, shuttle-api can put the transaction in boltp-db, and at the same time create the tpv_item.
+* /c/api/tpv API should be build int shuttle-api
+* Can we move the transaction API from boltons to shuttle-api as part of this work, so that /internal/notify_updates can call the transaction.save locally and the tpv_item.save locally 
+* Can you move /internal/notify_updates out of web/db/index.js into its own file eg web/db/notify_updates.js. index.js should not contain any endpoints.
+
+
+
+
+
+
+
+
+We should include transaction in shuttle-api/notify_update so that its goes straight intop boltp-db. As part of notify_update for a transaction we should also save a "tpv" (stands for "transaction processing volume") object. 
+
+Ideally shuttle-api can get all the data it needs from dynamo without hitting CORE or SEARCH.
+
+notify_update should pass a transaction to shuttle-api.
+
+To create a tpv object we will need:
+	transaction: id, client, payment_method, gateway, processed, action, source, currency, amount, fee_amount, status, gateway_status 
+	client: application
+	payment_method: gateway
+	gateway: processor
+
+
+API jet 
+
+
+
+tpv_totals - API 
+
+We need a way to query transaction volume over a time period by application and client, however the volume of data in the tpv_items take means we need to be very careful about how we do so.
+
+tpv_totals is an array of tpv_total objects, something like:
+STRIPE PAYMENT MOTO SUCCESS VISA GBP [cl_1, cl_2] 3 50.0 0.34
+STRIPE PAYMENT MOTO SUCCESS MASTERCARD GBP [cl_1, cl_2] 2 50.0 0.34
+STRIPE PAYMENT MOTO DECLINED DECLINED VISA GBP [cl_1] 1 150.0 0
+STRIPE PAYMENT MOTO DECLINED DECLINED MASTERCARD GBP [cl_2] 2 75.0 0
+
+Structured as such:
+tpv_totals: [
+	{	
+		// group by fields
+		processor: "STRIPE",
+		action: "PAYMENT",
+		source: "MOTO",
+		status: "SUCCESS",
+		gateway_status: "APPROVED" // only populate for !SUCCESS
+		card_type: "VISA",
+		currency: "GBP",
+
+		// select fields
+		clients: ["cl_1234","cl_4567"], // distinct list 
+		transactions: 500, // count of records
+		amount: 999.99, // sum(amount)
+		fee_amount: 9.99, // sum(fee_amount) 
+	}
+]
+
+This will be created via a search server query (called in the context of an "application", or a "client" or neither). If you pass the search server an array of indexes eg `index: {client_hour: ["cl_1234_448378","cl_1234_448379","cl_1234_448380"]}` the search server will run 3 queries and collate the results for you. So the trick will be to work out all the "hours" the date range crosses into, and set the index appropriately.
+
+object_type: "tpv_item"
+criteria: [{ // if no criteria, omit this which will be a massive performance boost
+	AND
+		application = || client = // not needed if done by the index 
+		when BETWEEN :start and :end // not needed if done by the index and timezone_offset_seconds == 0
+}],
+aggregate:
+	group_by processor
+	group_by action
+	group_by source
+	group_by status
+	group_by gateway_status
+	group_by card_type
+	group_by currency
+		clients: DISTINCT_LIST client
+		transactions: COUNT
+		amount: SUM amount
+		fee_amount: SUM fee_amount
+index:
+	client_hour: ["",""] || application_hour: ["",""] || hour: ["",""]
+
+You will need to transform the result to flatten the group_by's
+
+CACHING
+
+Now, to prevent this API completely destroying the search server, we need to make sure the search is never run on a significant amount of data. As such we'll only every at most search across 25 hours of data, and have a strong caching layer. 
+
+When querying (and caching) data we need to do so for the TIMEZONE of the APPLICATION (new field application.timezone_offset_seconds || 0). For now, we can pass the timezone_offset_seconds field around but always have a 0 timezone offset to simplify the implementation.
+
+We'll cache data:
+By hour (TTL 24 hours)
+By day (TTL 24 months)
+By month (TTL 48 months)
+
+Any hourly query, future hours return empty array, else run on the search server, and unless its the CURRENT hour cache it for 24 hours. If  timezone_offset_seconds != 0, you will need to work out the start and end time, search over 2 hours indexes, and include a "when" criteria  
+
+Any daily query, future days return an empty array, else run 23 hourly queries and aggregate, and unless its the CURRENT day cache it for 24 months.
+
+Any monthly query, future months return an empty array, else run 28-31 daily queries and aggregate, and unless its the CURRENT month cache it for 48 months.
+
+
+Can we create an API endpoint in shuttle-api:
+
+GET /c/api/tpv/totals?application=&client=cl_1234&start=2021-02-24&end=2021-02-24
+GET /c/api/instances/:instance_key/tpv/totals?start=&end=
+Where:
+	application: filter
+	client: filter
+	instance_key: convert to a client filter
+	start: a month stamp (2021-01) OR a date (2021-02-03) stamp (no time component)
+	end: a date stamp (no time component)
+
+These APIs will need:
+	get application.timezone_offset_seconds 
+
+Work out how to combine DAY and MONTH requests to generate the range. 
+	2021-01-01 - 2021-02-28: [or 2021-01 - 2021-02] aggregate(2 x month request for 2021-01 and 2021-02)
+	2021-01-01 - 2021-02-28: aggregate(1 x month request 2021-01 & 1 x day request 2021-02-01)
+
+To support this we need a couple of function:
+
+tpv_total.hour(hour_since_1970, timezone_offset_seconds, {application:,client:})
+	if (is_future(hour)) return {tpv_totals: []};
+	cache_key = is_current(day) ? undefined : `tpv_total_${application | client | all}_${day}_${offset}`
+	cached(cache_key, ttl: 24h)
+		aggregate(times(24, () => tpv_total.hour));
+
+tpv_total.day(day_since_1970, timezone_offset_seconds, {application:,client:})
+	if (is_future(day)) return {tpv_totals: []};
+	cache_key = is_current(day) ? undefined : `tpv_total_${application | client | all}_${day}_${offset}`
+	cached(cache_key, ttl: 24m)
+		aggregate(times(24, () => tpv_total.hour));
+
+
+tpv_total.month(month ("2021-01"), timezone_offset_seconds, {application:,client:})
+	if (is_future(month)) return {tpv_totals: []};
+	cache_key = is_current(month) ? undefined : `tpv_total_${application | client | all}_${month}_${offset}`
+	cached(cache_key, ttl: 48m)
+		aggregate(map(days_in_month, () => tpv_total.day));
+
+tpv_total.aggregate(tpv_totals_list: [{tpv_totals: [{...}]])
+	reduce(tpv_totals_list 
+		group by [processor, card_type, action, source, currency, status, gateway_status]
+	recalculate:
+		clients = DISTINCT UNION
+		transactions: sum(transactions)
+		amount: sum(amount)
+		fee_amount: sum(fee_amount)
+
+

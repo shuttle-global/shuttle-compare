@@ -1,0 +1,42 @@
+Onboarding
+
+There are 3 key components to onboarding
+
+1. Create a Shuttle account for your merchant
+2. Check to see if the Shuttle account is ready to process payments
+3. Inject our configuration tool into your merchant's setup screen. 
+
+Decide on which screen it makes sense for a merchant to configure payments, and follow the following logic on load:
+
+```
+// Server Side
+
+// Fetch if Shuttle is ready to process payments
+instance = GET [api]/setup/payments
+
+// If no Shuttle account, create one
+if (instance.active == false) {
+	POST [api]/instances
+}
+
+// Create a deep_link to the merchant configuration screen
+POST [api]/deep_links
+```
+
+```
+// Screen Render
+
+{{if !instance.payments_ready}}
+	// Recommended: Include a call to action to configure payments
+{{/if}}
+
+// Include a container div for the payments configurator
+<div data-shuttle-embed="${deep_link.id}"></div>
+
+// Include this at the bottom of the page
+<script src="https://app.shuttleglobal.com/b/web/s/payments-1.2.X.min.js">
+
+// Optional, if the <div> is added to the page or changes AFTER page load, call
+Shuttle.bind(); // This will reload the div
+```
+

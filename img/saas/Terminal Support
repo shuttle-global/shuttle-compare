@@ -1,0 +1,55 @@
+Terminal Support
+
+Add terminal to getGatewayDetails, something like the below, maybe nested under PED payment type
+
+1. 
+gateway
+	getGatewayDetails
+	getPeds // not gatewayDetails, so caching can work differently
+		// Return paymnent method PED
+		ped_locations: [{ 
+			id: 
+			name:
+			description: 
+		}],
+		peds: [{
+			id: ""
+			name: "" // label
+			location: ""
+			status: // online / offline 
+			// ip_address
+			// device_type
+			// device_sw_version
+			// serial number
+			// label
+		}]
+	getGatewayDetails
+
+2. POST /payments
+// If source: POS
+// "ped": mandatory field, pass this through to the gateway
+// return PENDING statis
+
+Need some kind of checkout.js
+https://stripe.com/docs/terminal/payments
+
+3. DELETE /payments
+// If PENDING and feature "CANCEL_PENDING", then issue a cancellation
+
+
+doPayment({
+	instance_key:
+	ped_location: // optional, if not passed can chose any 
+	ped: // optional, if not passed user selectable
+	currency:
+	amount:
+	// Other info 
+})
+
+return PENDING
+
+
+
+Widget:
+[Payment Status]
+[Switch Terminal]

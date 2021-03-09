@@ -1,1 +1,0 @@
-(window.webpackJsonp=window.webpackJsonp||[]).push([[13,4],{108:function(e,a,t){"use strict";t.r(a);var n=t(0),c=t.n(n),l=t(75);a.default=function(){return c.a.createElement(l.a,{title:""},c.a.createElement("div",{className:"container margin-vert--xl"},c.a.createElement("div",{className:"row"},c.a.createElement("div",{className:"col col--6 col--offset-3"}))))}}}]);

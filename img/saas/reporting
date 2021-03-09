@@ -1,0 +1,130 @@
+1.
+Stripe ACH / SEPA
+Braintree v2
+Oracle
+
+
+Report Format
+getByIds
+
+
+1. MOVE ALL REPORT LOGIC TO SHUTTLE_API
+
+POST /report
+{
+	name: "Approved Transactions 1 Jan - 1 Feb"
+	object_type: "payment_transaction"
+	criteria: {"op": "AND", "qs": {"op": "=", "key": "status", "value": "APPROVED"}}
+	format: {
+		bolton: "bo_1000_1"
+		format: "MYHILLSONG"
+	}
+}
+Logic:
+Validate permissions
+Create object in statis CREATED
+Save
+Return POST /report/:id/rebuild
+
+POST /report/:id/rebuild
+Logic:
+* Delete S3 object_list + S3 for report formats
+* status = BUILDING
+* item_count = undefined
+* error = null
+* format.status = CREATED
+* save report object 
+* Return get /report/:id
+	* ASYNC run search query (asynchronously)
+	* Save results to S3 {bolt-db-files}/client-:id/report/:id/items.json
+	* set item_count
+	* Set status == AVAILABLE
+	* Loop POST /report/:id/format/:id/rebuild
+
+GET /report/:id
+{
+	...report - see create...
+}
+Return (* is generated and cannot be passed in CREATE)
+{
+	*id: ""
+	*status: CREATED / BUILDING / AVAILABLE (once object-list generated) / FAILED (object-list query failed) / ARCHIVE
+	name: "Approved Transactions 1 Jan - 1 Feb"
+	object_type: "payment_transaction"
+	criteria: {"op": "AND", "qs": {"op": "=", "key": "status", "value": "APPROVED"}},
+	* item_count: 1000000,
+	error: // if search fails
+	format: {
+		*id: (set during create)
+		bolton: "bo_1000_1" 
+		format: "MYHILLSONG"
+		*mime_type: "text/csv" (set during create)
+		*status: CREATED / BUILDING / AVAILABLE / FAILED / ARCHIVE
+		*chunk_size: 1000 // if CREATED/BUILDING (from format) (set during create)
+		*chunks_total: 5 // if BUILDING
+		*chunks_pending: [0,1,2,3,4] // if BUILDING
+		*error: // if FAILED
+	}
+	*created: "2020-01-01T23:59:59Z",
+	*created_user: "" // naming convension
+	*created_session: "" // naming convension
+	*updated: "2020-01-01T23:59:59Z"	
+}
+POST /report/:id/format
+{
+	bolton: "bo_1000_1"
+	format: "MYHILLSONG"
+}
+// Validate Report in BUILDING / AVAILABLE and the format doesn't exist in (CREATED / BUILDING / AVAILABLE)
+Return
+{
+	...report...
+}
+
+POST /report/:id/format/:id/rebuild
+Logic:
+* Delete all S3 objects for format
+* Set 
+	status = BUILDING
+	error = null
+	chunks_total, chunks_ending  (Calculate item_count / chunk_size)
+* SQS a record for every chunk of the report (low priority)
+
+POST /report/:id/format/:id/rebuild/chunk/:chunk
+Send to formatter boltons, update formatter boltons to fetch via:
+	GET /report/:id/items?limit=&offset&expand=transactions
+
+DELETE /report/:id/format/:id
+* Delete all s3 data for format, into status ARCHIVE
+
+DELETE /report/:id
+* Delete all s3 data for formats (keep s3 of object_list), transition them into status ARCHIVE
+* transition them into status ARCHIVE
+
+
+
+
+/report/:id/items?limit=&offset&expand=transactions
+{
+	transactions: ["tr_1000_123", "tr_1000_124"]
+	//contracts
+	//claims:
+	meta: {
+		limit:
+		offset:
+		total:
+	}
+}
+
+UX
+
+Report/Create
+Run select and post to new report endpoint OR post query
+POST /report/:id
+
+Report/View
+Remove section:
+	Report Type:Approved Transactions
+	Filter By:When Entered
+	Date Range:30 Oct 2020, 00:00:00 - 30 Oct 2020, 10:09:57
+	Criteria:Company: Hillsong Church London
